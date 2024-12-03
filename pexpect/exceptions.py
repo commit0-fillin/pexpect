@@ -17,7 +17,9 @@ class ExceptionPexpect(Exception):
         """This returns an abbreviated stack trace with lines that only concern
         the caller. In other words, the stack trace inside the Pexpect module
         is not included. """
-        pass
+        tblist = traceback.extract_tb(sys.exc_info()[2])
+        tblist = [item for item in tblist if 'pexpect' not in item[0]]
+        return ''.join(traceback.format_list(tblist))
 
 class EOF(ExceptionPexpect):
     """Raised when EOF is read from a child.
