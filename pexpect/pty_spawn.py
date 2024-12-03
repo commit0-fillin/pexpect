@@ -15,7 +15,10 @@ from .utils import which, split_command_line, select_ignore_interrupts, poll_ign
 @contextmanager
 def _wrap_ptyprocess_err():
     """Turn ptyprocess errors into our own ExceptionPexpect errors"""
-    pass
+    try:
+        yield
+    except ptyprocess.PtyProcessError as e:
+        raise ExceptionPexpect(str(e))
 PY3 = sys.version_info[0] >= 3
 
 class spawn(SpawnBase):
@@ -226,11 +229,39 @@ class spawn(SpawnBase):
         fork/exec type of stuff for a pty. This is called by __init__. If args
         is empty then command will be parsed (split on spaces) and args will be
         set to parsed arguments. """
-        pass
+        if not isinstance(args, (list, tuple)):
+            args = shlex.split(args)
 
-    def _spawnpty(self, args, **kwargs):
+        if args == []:
+            args = shlex.split(command)
+            command = args[0]
+
+        command_with_path = which(command)
+        if command_with_path is None:
+            raise ExceptionPexpect('The command was not found or was not executable: %s.' % command)
+
+        self.command = command
+        self.args = args
+        self.name = '<' + ' '.join(self.args) + '>'
+
+        self.ptyproc = self._spawnpty(self.args, preexec_fn, dimensions)
+        self.pid = self.ptyproc.pid
+        self.child_fd = self.ptyproc.fd
+
+        self.terminated = False
+        self.closed = False
+
+    def _spawnpty(self, args, preexec_fn=None, dimensions=None):
         """Spawn a pty and return an instance of PtyProcess."""
-        pass
+        kwargs = {}
+        if self.ignore_sighup:
+            kwargs['ignore_sighup'] = True
+        if preexec_fn is not None:
+            kwargs['preexec_fn'] = preexec_fn
+        if dimensions is not None:
+            kwargs['dimensions'] = dimensions
+
+        return ptyprocess.PtyProcess.spawn(args, **kwargs)
 
     def close(self, force=True):
         """This closes the connection with the child application. Note that
@@ -238,7 +269,12 @@ class spawn(SpawnBase):
         behavior with files. Set force to True if you want to make sure that
         the child is terminated (SIGKILL is sent if the child ignores SIGHUP
         and SIGINT). """
-        pass
+        if not self.closed:
+            self.flush()
+            self.ptyproc.close(force=force)
+            self.isalive()  # Update exit status
+            self.child_fd = -1
+            self.closed = True
 
     def isatty(self):
         """This returns True if the file descriptor is open and connected to a
@@ -248,7 +284,7 @@ class spawn(SpawnBase):
         the child pty may not appear as a terminal device.  This means
         methods such as setecho(), setwinsize(), getwinsize() may raise an
         IOError. """
-        pass
+        return os.isatty(self.child_fd)
 
     def waitnoecho(self, timeout=-1):
         """This waits until the terminal ECHO flag is set False. This returns
@@ -266,7 +302,16 @@ class spawn(SpawnBase):
         If timeout==-1 then this method will use the value in self.timeout.
         If timeout==None then this method to block until ECHO flag is False.
         """
-        pass
+        if timeout == -1:
+            timeout = self.timeout
+        if timeout is not None:
+            end_time = time.time() + timeout
+        while True:
+            if not self.getecho():
+                return True
+            if timeout is not None and time.time() > end_time:
+                return False
+            time.sleep(0.1)
 
     def getecho(self):
         """This returns the terminal echo mode. This returns True if echo is
@@ -274,7 +319,18 @@ class spawn(SpawnBase):
         to enter a password often set ECHO False. See waitnoecho().
 
         Not supported on platforms where ``isatty()`` returns False.  """
-        pass
+        if not self.isatty():
+            raise IOError('getecho() is not supported on platforms where isatty() returns False.')
+        import termios
+        try:
+            attr = termios.tcgetattr(self.child_fd)
+        except termios.error as err:
+            errmsg = 'getecho() may not be called on this platform'
+            if err.args[0] == errno.EINVAL:
+                raise IOError(errmsg)
+            raise err
+
+        return bool(attr[3] & termios.ECHO)
 
     def setecho(self, state):
         """This sets the terminal echo mode on or off. Note that anything the
@@ -308,7 +364,28 @@ class spawn(SpawnBase):
 
         Not supported on platforms where ``isatty()`` returns False.
         """
-        pass
+        if not self.isatty():
+            raise IOError('setecho() is not supported on platforms where isatty() returns False.')
+        import termios
+        try:
+            attr = termios.tcgetattr(self.child_fd)
+        except termios.error as err:
+            errmsg = 'setecho() may not be called on this platform'
+            if err.args[0] == errno.EINVAL:
+                raise IOError(errmsg)
+            raise err
+
+        if state:
+            attr[3] |= termios.ECHO
+        else:
+            attr[3] &= ~termios.ECHO
+
+        try:
+            termios.tcsetattr(self.child_fd, termios.TCSANOW, attr)
+        except IOError as err:
+            if err.args[0] == errno.EINVAL:
+                raise IOError('setecho() may not be called on this platform')
+            raise
 
     def read_nonblocking(self, size=1, timeout=-1):
         """This reads at most size characters from the child application. It
