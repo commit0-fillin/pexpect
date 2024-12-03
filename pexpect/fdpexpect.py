@@ -62,32 +62,45 @@ class fdspawn(SpawnBase):
         Calling this method a second time does nothing, but if the file
         descriptor was closed elsewhere, :class:`OSError` will be raised.
         """
-        pass
+        if not self.closed:
+            os.close(self.child_fd)
+            self.closed = True
 
     def isalive(self):
         """This checks if the file descriptor is still valid. If :func:`os.fstat`
         does not raise an exception then we assume it is alive. """
-        pass
+        if self.closed:
+            return False
+        try:
+            os.fstat(self.child_fd)
+            return True
+        except OSError:
+            return False
 
     def terminate(self, force=False):
         """Deprecated and invalid. Just raises an exception."""
-        pass
+        raise ExceptionPexpect('This method is not valid for file descriptors.')
 
     def send(self, s):
         """Write to fd, return number of bytes written"""
-        pass
+        if not self.isatty() and isinstance(s, self.string_type):
+            s = s.encode(self.encoding)
+        return os.write(self.child_fd, s)
 
     def sendline(self, s):
         """Write to fd with trailing newline, return number of bytes written"""
-        pass
+        n = self.send(s)
+        n += self.send(self.linesep)
+        return n
 
     def write(self, s):
         """Write to fd, return None"""
-        pass
+        self.send(s)
 
     def writelines(self, sequence):
         """Call self.write() for each item in sequence"""
-        pass
+        for s in sequence:
+            self.write(s)
 
     def read_nonblocking(self, size=1, timeout=-1):
         """
@@ -105,4 +118,34 @@ class fdspawn(SpawnBase):
             ready to read. When -1 (default), use self.timeout. When 0, poll.
         :return: String containing the bytes read
         """
-        pass
+        if timeout == -1:
+            timeout = self.timeout
+        
+        if timeout is not None:
+            end_time = time.time() + timeout
+        
+        if self.use_poll:
+            poller = select.poll()
+            poller.register(self.child_fd, select.POLLIN)
+        
+        while True:
+            try:
+                if self.use_poll:
+                    events = poller.poll(timeout * 1000 if timeout is not None else None)
+                    if not events:
+                        raise TIMEOUT('Timeout exceeded in read_nonblocking().')
+                else:
+                    rlist, _, _ = select_ignore_interrupts([self.child_fd], [], [], timeout)
+                    if not rlist:
+                        raise TIMEOUT('Timeout exceeded in read_nonblocking().')
+                
+                s = os.read(self.child_fd, size)
+                if s == b'':
+                    self.flag_eof = True
+                    raise EOF('EOF encountered in read_nonblocking().')
+                return self._decoder.decode(s, final=False)
+            except InterruptedError:
+                if timeout is not None:
+                    timeout = end_time - time.time()
+                    if timeout <= 0:
+                        raise TIMEOUT('Timeout exceeded in read_nonblocking().')
