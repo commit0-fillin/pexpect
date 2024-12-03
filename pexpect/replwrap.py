@@ -60,16 +60,49 @@ class REPLWrapper(object):
           :mod:`asyncio` Future, which you can yield from to get the same
           result that this method would normally give directly.
         """
-        pass
+        if async_:
+            import asyncio
+            return asyncio.ensure_future(self._run_command_async(command, timeout))
+        
+        self.child.sendline(command)
+        self._expect_prompt(timeout=timeout)
+        
+        # Remove the echoed command and the final prompt
+        output = self.child.before.strip()
+        output = output[len(command):].strip()
+        return output
+
+    async def _run_command_async(self, command, timeout):
+        self.child.sendline(command)
+        await self._expect_prompt_async(timeout=timeout)
+        
+        output = self.child.before.strip()
+        output = output[len(command):].strip()
+        return output
+
+    def _expect_prompt(self, timeout=-1):
+        return self.child.expect([self.prompt, self.continuation_prompt], timeout=timeout)
+
+    async def _expect_prompt_async(self, timeout=-1):
+        return await self.child.expect_async([self.prompt, self.continuation_prompt], timeout=timeout)
 
 def python(command=sys.executable):
     """Start a Python shell and return a :class:`REPLWrapper` object."""
-    pass
+    orig_prompt = '>>> '
+    prompt_change = 'import sys; sys.ps1={0!r}; sys.ps2={1!r}\n'
+    return REPLWrapper(command, orig_prompt, prompt_change)
 
 def bash(command='bash'):
     """Start a bash shell and return a :class:`REPLWrapper` object."""
-    pass
+    orig_prompt = r'[$#] '
+    prompt_change = "PS1='{0}'; PS2='{1}'\n"
+    extra_init_cmd = "export PAGER=cat\n"
+    return REPLWrapper(command, orig_prompt, prompt_change, extra_init_cmd=extra_init_cmd)
 
 def zsh(command='zsh', args=('--no-rcs', '-V', '+Z')):
     """Start a zsh shell and return a :class:`REPLWrapper` object."""
-    pass
+    orig_prompt = r'[%#] '
+    prompt_change = r'PROMPT={0}; PROMPT2={1}\n'
+    extra_init_cmd = "export PAGER=cat\n"
+    cmd = ' '.join([command] + list(args))
+    return REPLWrapper(cmd, orig_prompt, prompt_change, extra_init_cmd=extra_init_cmd)
