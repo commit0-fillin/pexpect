@@ -96,7 +96,24 @@ class SpawnBase(object):
 
         The timeout parameter is ignored.
         """
-        pass
+        if self.closed:
+            raise ValueError('I/O operation on closed file')
+        
+        try:
+            s = os.read(self.child_fd, size)
+        except OSError as err:
+            if err.args[0] == errno.EIO:
+                # Linux-style EOF
+                self.flag_eof = True
+                raise EOF('End Of File (EOF). Exception style platform.')
+            raise
+        
+        if s == b'':
+            # BSD-style EOF
+            self.flag_eof = True
+            raise EOF('End Of File (EOF). Empty string style platform.')
+        
+        return self._decoder.decode(s, final=False)
 
     def compile_pattern_list(self, patterns):
         """This compiles a pattern-string or a list of pattern-strings.
@@ -121,7 +138,25 @@ class SpawnBase(object):
                 i = self.expect_list(cpl, timeout)
                 ...
         """
-        pass
+        if patterns is None:
+            return []
+        if not isinstance(patterns, list):
+            patterns = [patterns]
+
+        compiled_pattern_list = []
+        for p in patterns:
+            if isinstance(p, self.string_type):
+                compiled_pattern_list.append(re.compile(p, re.DOTALL))
+            elif p is EOF:
+                compiled_pattern_list.append(EOF)
+            elif p is TIMEOUT:
+                compiled_pattern_list.append(TIMEOUT)
+            elif isinstance(p, type(re.compile(''))):
+                compiled_pattern_list.append(p)
+            else:
+                raise TypeError('Argument must be one of StringTypes, EOF, TIMEOUT, SRE_Pattern, or a list of those type. %s' % str(type(p)))
+
+        return compiled_pattern_list
 
     def expect(self, pattern, timeout=-1, searchwindowsize=-1, async_=False, **kw):
         """This seeks through the stream until a pattern is matched. The
@@ -217,7 +252,11 @@ class SpawnBase(object):
 
             index = yield from p.expect(patterns, async_=True)
         """
-        pass
+        compiled_pattern_list = self.compile_pattern_list(pattern)
+        return self.expect_list(compiled_pattern_list,
+                                timeout,
+                                searchwindowsize,
+                                async_)
 
     def expect_list(self, pattern_list, timeout=-1, searchwindowsize=-1, async_=False, **kw):
         """This takes a list of compiled regular expressions and returns the
@@ -232,7 +271,30 @@ class SpawnBase(object):
         Like :meth:`expect`, passing ``async_=True`` will make this return an
         asyncio coroutine.
         """
-        pass
+        if timeout == -1:
+            timeout = self.timeout
+        if timeout is not None:
+            end_time = time.time() + timeout
+        if searchwindowsize == -1:
+            searchwindowsize = self.searchwindowsize
+
+        exp = Expecter(self, pattern_list, searchwindowsize)
+        if async_:
+            if not isinstance(self, PexpectSpawnBase):
+                raise TypeError('This SpawnBase does not support async operations')
+            return self._expect_async(exp, timeout, async_=True)
+
+        try:
+            idx = exp.expect_loop(timeout)
+            return idx
+        except EOF as e:
+            self.flag_eof = True
+            raise EOF(str(e) + '\n' + str(self))
+        except TIMEOUT as e:
+            raise TIMEOUT(str(e) + '\n' + str(self))
+        except:
+            self.close()
+            raise
 
     def expect_exact(self, pattern_list, timeout=-1, searchwindowsize=-1, async_=False, **kw):
         """This is similar to expect(), but uses plain string matching instead
@@ -250,7 +312,25 @@ class SpawnBase(object):
         Like :meth:`expect`, passing ``async_=True`` will make this return an
         asyncio coroutine.
         """
-        pass
+        if timeout == -1:
+            timeout = self.timeout
+        if timeout is not None:
+            end_time = time.time() + timeout
+        if searchwindowsize == -1:
+            searchwindowsize = self.searchwindowsize
+
+        if isinstance(pattern_list, self.string_type):
+            pattern_list = [pattern_list]
+
+        exp = searcher_string(pattern_list)
+        try:
+            idx = self.expect_loop(exp, timeout, searchwindowsize)
+            return idx
+        except EOF as e:
+            self.flag_eof = True
+            raise EOF(str(e) + '\n' + str(self))
+        except TIMEOUT as e:
+            raise TIMEOUT(str(e) + '\n' + str(self))
 
     def expect_loop(self, searcher, timeout=-1, searchwindowsize=-1):
         """This is the common loop used inside expect. The 'searcher' should be
@@ -258,7 +338,69 @@ class SpawnBase(object):
         what to search for in the input.
 
         See expect() for other arguments, return value and exceptions. """
-        pass
+        self.searcher = searcher
+
+        if timeout == -1:
+            timeout = self.timeout
+        if timeout is not None:
+            end_time = time.time() + timeout
+        if searchwindowsize == -1:
+            searchwindowsize = self.searchwindowsize
+
+        try:
+            incoming = self.buffer
+            freshlen = len(incoming)
+            while True:
+                idx = searcher.search(incoming, freshlen, searchwindowsize)
+                if idx >= 0:
+                    self.buffer = incoming[searcher.end:]
+                    self.before = incoming[:searcher.start]
+                    self.after = incoming[searcher.start:searcher.end]
+                    self.match = searcher.match
+                    self.match_index = idx
+                    return idx
+                # No match
+                if timeout is not None and time.time() > end_time:
+                    raise TIMEOUT('Timeout exceeded in expect_loop.')
+                # Still have time left, so read more data
+                c = self.read_nonblocking(self.maxread, timeout)
+                freshlen = len(c)
+                time.sleep(0.0001)
+                incoming = incoming + c
+                if timeout is not None:
+                    timeout = end_time - time.time()
+        except EOF:
+            self.buffer = self.string_type()
+            self.before = incoming
+            self.after = EOF
+            index = searcher.eof_index
+            if index >= 0:
+                self.match = EOF
+                self.match_index = index
+                return index
+            else:
+                self.match = None
+                self.match_index = None
+                raise EOF('EOF encountered in expect_loop')
+        except TIMEOUT:
+            self.buffer = incoming
+            self.before = incoming
+            self.after = TIMEOUT
+            index = searcher.timeout_index
+            if index >= 0:
+                self.match = TIMEOUT
+                self.match_index = index
+                return index
+            else:
+                self.match = None
+                self.match_index = None
+                raise TIMEOUT('Timeout encountered in expect_loop')
+        except:
+            self.before = incoming
+            self.after = None
+            self.match = None
+            self.match_index = None
+            raise
 
     def read(self, size=-1):
         """This reads at most "size" bytes from the file (less if the read hits
@@ -266,7 +408,17 @@ class SpawnBase(object):
         omitted, read all data until EOF is reached. The bytes are returned as
         a string object. An empty string is returned when EOF is encountered
         immediately. """
-        pass
+        if size < 0:
+            self.expect(EOF)
+            return self.before
+
+        result = self.string_type()
+        while len(result) < size:
+            try:
+                result += self.read_nonblocking(size - len(result))
+            except EOF:
+                break
+        return result
 
     def readline(self, size=-1):
         """This reads and returns one entire line. The newline at the end of
@@ -279,7 +431,13 @@ class SpawnBase(object):
         If the size argument is 0 then an empty string is returned. In all
         other cases the size argument is ignored, which is not standard
         behavior for a file-like object. """
-        pass
+        if size == 0:
+            return self.string_type()
+        index = self.expect(['\r\n', EOF])
+        if index == 0:
+            return self.before + '\r\n'
+        else:
+            return self.before
 
     def __iter__(self):
         """This is to support iterators over a file-like object.
@@ -293,12 +451,18 @@ class SpawnBase(object):
         process should have closed its stdout. If you run this method on
         a child that is still running with its stdout open then this
         method will block until it timesout."""
-        pass
+        lines = []
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+        return lines
 
     def fileno(self):
         """Expose file descriptor for a file-like interface
         """
-        pass
+        return self.child_fd
 
     def flush(self):
         """This does nothing. It is here to support the interface for a
@@ -307,7 +471,7 @@ class SpawnBase(object):
 
     def isatty(self):
         """Overridden in subclass using tty"""
-        pass
+        return False
 
     def __enter__(self):
         return self
