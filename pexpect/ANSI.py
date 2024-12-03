@@ -102,30 +102,37 @@ class ANSI(term):
 
     def process(self, c):
         """Process a single character. Called by :meth:`write`."""
-        pass
+        self.state.process(c)
 
     def write(self, s):
         """Process text, writing it to the virtual screen while handling
         ANSI escape codes.
         """
-        pass
+        for c in self._decode(s):
+            self.process(c)
 
     def write_ch(self, ch):
         """This puts a character at the current cursor position. The cursor
         position is moved forward with wrap-around, but no scrolling is done if
         the cursor hits the lower-right corner of the screen. """
-        pass
+        self.put(ch)
 
     def do_sgr(self, fsm):
         """Select Graphic Rendition, e.g. color. """
+        # In a basic implementation, we'll just ignore SGR codes
+        # A full implementation would handle color and text style changes
         pass
 
     def do_decsca(self, fsm):
         """Select character protection attribute. """
+        # In a basic implementation, we'll ignore character protection
+        # A full implementation would handle protected characters
         pass
 
     def do_modecrap(self, fsm):
         """Handler for \x1b[?<number>h and \x1b[?<number>l. If anyone
         wanted to actually use these, they'd need to add more states to the
         FSM rather than just improve or override this method. """
+        # In a basic implementation, we'll ignore these mode settings
+        # A full implementation would handle various terminal modes
         pass
