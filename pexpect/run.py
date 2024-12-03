@@ -89,9 +89,81 @@ def run(command, timeout=30, withexitstatus=False, events=None, extra_args=None,
     instead of bytes. You can pass *codec_errors* to control how errors in
     encoding and decoding are handled.
     """
-    pass
+    # Import necessary modules
+    from .spawn import spawn
+    from .exceptions import ExceptionPexpect, TIMEOUT, EOF
+
+    # Create a new spawn instance
+    child = spawn(command, timeout=timeout, maxread=2000, logfile=logfile, cwd=cwd, env=env, **kwargs)
+
+    # Initialize variables
+    output = ""
+    event_count = 0
+
+    # Process events
+    if events is not None:
+        if isinstance(events, dict):
+            events = list(events.items())
+        elif not isinstance(events, list):
+            raise TypeError('events must be a dictionary or list of tuples')
+
+    try:
+        while True:
+            try:
+                index = child.expect([EOF, TIMEOUT] + [x for x, y in events])
+                if index == 0:  # EOF
+                    break
+                elif index == 1:  # TIMEOUT
+                    if events is None:
+                        break
+                    event_count += 1
+                    response = events[index - 2][1]
+                else:
+                    event_count += 1
+                    response = events[index - 2][1]
+
+                if callable(response):
+                    response = response({
+                        'child': child,
+                        'event_count': event_count,
+                        'extra_args': extra_args
+                    })
+
+                if response is True:
+                    break
+                elif isinstance(response, str):
+                    child.sendline(response)
+                elif response is not None:
+                    child.sendline(str(response))
+
+            except TIMEOUT:
+                break
+            except EOF:
+                break
+
+        # Collect output
+        output = child.before
+
+        # Get exit status if requested
+        if withexitstatus:
+            child.close()
+            exitstatus = child.exitstatus
+            return (output, exitstatus)
+        else:
+            return output
+
+    finally:
+        # Ensure the child process is terminated
+        if child.isalive():
+            child.terminate()
 
 def runu(command, timeout=30, withexitstatus=False, events=None, extra_args=None, logfile=None, cwd=None, env=None, **kwargs):
     """Deprecated: pass encoding to run() instead.
     """
-    pass
+    import warnings
+    warnings.warn("runu() is deprecated. Use run() with encoding='utf-8' instead.",
+                  DeprecationWarning, stacklevel=2)
+    
+    if 'encoding' not in kwargs:
+        kwargs['encoding'] = 'utf-8'
+    return run(command, timeout, withexitstatus, events, extra_args, logfile, cwd, env, **kwargs)
